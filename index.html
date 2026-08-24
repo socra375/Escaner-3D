@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARIA - Escáner Holográfico 3D</title>
+    <!-- Fuentes HUD/Futuristas -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-color: #030812;
+            --primary-cyan: #00f3ff;
+            --cyan-glow: rgba(0, 243, 255, 0.4);
+            --cyan-dim: rgba(0, 243, 255, 0.15);
+            --warn-amber: #ffb700;
+            --danger-red: #ff0055;
+            --text-main: #e0f8ff;
+            --hud-font: 'Share Tech Mono', monospace;
+            --title-font: 'Orbitron', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            font-family: var(--hud-font);
+            color: var(--text-main);
+        }
+
+        /* --- EFECTOS DE FONDO Y SCANLINES --- */
+        #radar-grid {
+            position: absolute;
+            inset: 0;
+            background-image: 
+                radial-gradient(circle at center, transparent 30%, var(--bg-color) 90%),
+                linear-gradient(var(--cyan-dim) 1px, transparent 1px),
+                linear-gradient(90deg, var(--cyan-dim) 1px, transparent 1px);
+            background-size: 100% 100%, 40px 40px, 40px 40px;
+            z-index: 1;
+            pointer-events: none;
+        }
+
+        .scanlines {
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(
+                to bottom,
+                rgba(255,255,255,0),
+                rgba(255,255,255,0) 50%,
+                rgba(0, 0, 0, 0.4) 50%,
+                rgba(0, 0, 0, 0.4)
+            );
+            background-size: 100% 4px;
+            z-index: 2;
+            pointer-events: none;
+            opacity: 0.6;
+        }
+
+        /* --- VISOR THREE.JS --- */
+        #canvas-container {
+            position: absolute;
+            inset: 0;
+            z-index: 3;
+        }
+
+        /* --- INTERFAZ HUD --- */
+        .hud-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 4;
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            padding: 20px;
+            pointer-events: none;
+        }
+
+        .hud-overlay * {
+            pointer-events: auto;
+        }
+
+        /* Header HUD */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--primary-cyan);
+            padding-bottom: 10px;
+            background: linear-gradient(90deg, var(--cyan-dim), transparent);
+            box-shadow: 0 4px 15px var(--cyan-glow);
+        }
+
+        .brand-title {
+            font-family: var(--title-font);
+            font-size: 1.5rem;
+            font-weight: 900;
+            letter-spacing: 3px;
+            color: var(--primary-cyan);
+            text-shadow: 0 0 10px var(--primary-cyan);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand-title::before {
+            content: '';
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            background: var(--primary-cyan);
+            box-shadow: 0 0 8px var(--primary-cyan);
+            animation: pulse 1.5s infinite alternate;
+        }
+
+        .sys-status {
+            font-size: 0.85rem;
+            letter-spacing: 1px;
+            color: var(--primary-cyan);
+            text-transform: uppercase;
+        }
+
+        /* Zona Central HUD */
+        main {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 20px;
+            margin-top: 20px;
+            height: calc(100% - 40px);
+        }
+
+        @media (max-width: 850px) {
+            main {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto 1fr;
+            }
+        }
+
+        /* Panel de Control Lateral */
+        .control-panel {
+            background: rgba(3, 12, 26, 0.75);
+            border: 1px solid var(--cyan-dim);
+            border-left: 3px solid var(--primary-cyan);
+            padding: 20px;
+            backdrop-filter: blur(8px);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            box-shadow: inset 0 0 20px rgba(0, 243, 255, 0.05);
+            max-height: 100%;
+            overflow-y: auto;
+        }
+
+        .panel-title {
+            font-family: var(--title-font);
+            font-size: 0.9rem;
+            letter-spacing: 2px;
+            color: var(--primary-cyan);
+            border-bottom: 1px dashed var(--cyan-dim);
+            padding-bottom: 5px;
+        }
+
+        /* Area Drop Input Image */
+        .drop-zone {
+            border: 2px dashed var(--cyan-dim);
+            border-radius: 4px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            background: rgba(0, 243, 255, 0.02);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 160px;
+        }
+
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: var(--primary-cyan);
+            background: var(--cyan-dim);
+            box-shadow: 0 0 15px var(--cyan-glow);
+        }
+
+        .drop-zone input[type="file"] {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .preview-img {
+            max-width: 100%;
+            max-height: 140px;
+            object-fit: contain;
+            border: 1px solid var(--primary-cyan);
+            box-shadow: 0 0 10px var(--cyan-glow);
+            display: none;
+        }
+
+        /* Botones HUD */
+        .hud-btn {
+            background: transparent;
+            border: 1px solid var(--primary-cyan);
+            color: var(--primary-cyan);
+            font-family: var(--hud-font);
+            font-size: 1rem;
+            padding: 12px;
+            letter-spacing: 2px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            text-transform: uppercase;
+        }
+
+        .hud-btn::before {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, var(--cyan-dim), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .hud-btn:hover::before {
+            left: 100%;
+        }
+
+        .hud-btn:hover {
+            background: var(--primary-cyan);
+            color: var(--bg-color);
+            box-shadow: 0 0 20px var(--primary-cyan);
+            font-weight: bold;
+        }
+
+        .hud-btn:disabled {
+            border-color: #445566;
+            color: #445566;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .hud-btn:disabled::before { display: none; }
+
+        /* Terminal Logs Terminal */
+        .terminal-box {
+            flex: 1;
+            background: rgba(0, 5, 12, 0.9);
+            border: 1px solid var(--cyan-dim);
+            padding: 12px;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 200px;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.8);
+        }
+
+        .log-line {
+            display: flex;
+            gap: 8px;
+        }
+
+        .log-time { color: #668899; }
+        .log-msg { color: var(--text-main); }
+        .log-warn { color: var(--warn-amber); }
+        .log-err { color: var(--danger-red); }
+        .log-success { color: var(--primary-cyan); font-weight: bold; }
+
+        /* Footer Info Controls */
+        footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: #557788;
+            border-top: 1px solid var(--cyan-dim);
+            padding-top: 8px;
+        }
+
+        /* Overlay para Cámara Web */
+        #webcam-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(3, 8, 18, 0.95);
+            z-index: 10;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            border: 2px solid var(--primary-cyan);
+        }
+
+        #webcam-video {
+            width: 90%;
+            max-width: 500px;
+            border: 1px solid var(--primary-cyan);
+            box-shadow: 0 0 15px var(--cyan-glow);
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.3; transform: scale(0.9); }
+            100% { opacity: 1; transform: scale(1.1); }
+        }
+
+        /* Custom Scrollbar HUD */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: var(--bg-color); }
+        ::-webkit-scrollbar-thumb { background: var(--cyan-dim); border-radius: 2px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary-cyan); }
+    </style>
+
+    <!-- Import Map: Se reemplazó Gradio por Transformers.js (ONNX en navegador) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3/+esm"
+        }
+    }
+    </script>
+</head>
+<body>
+
+    <!-- Fondos Escena -->
+    <div id="radar-grid"></div>
+    <div class="scanlines"></div>
+    
+    <!-- Visor 3D ThreeJS -->
+    <div id="canvas-container"></div>
+
+    <!-- Capa HUD GUI -->
+    <div class="hud-overlay">
+        <header>
+            <div class="brand-title">ARIA // SYSTEM HUD</div>
+            <div class="sys-status" id="sys-status">ESTADO: EN ESPERA</div>
+        </header>
+
+        <main>
+            <div class="control-panel">
+                <div class="panel-title">[01] FUENTE DE INPUT</div>
+                
+                <div class="drop-zone" id="drop-zone">
+                    <span id="drop-text">ARRASTRA UNA FOTO<br>O HAZ CLIC AQUÍ</span>
+                    <img id="preview-img" class="preview-img" alt="Vista previa">
+                    <input type="file" id="file-input" accept="image/*">
+                </div>
+
+                <button class="hud-btn" id="cam-btn">
+                    📷 CAPTURAR CÁMARA
+                </button>
+
+                <div class="panel-title">[02] PROCESAMIENTO</div>
+                
+                <button class="hud-btn" id="scan-btn" disabled>
+                    ⚡ INICIAR ESCANEO
+                </button>
+
+                <div class="panel-title">[03] TERMINAL ARIA</div>
+                <div class="terminal-box" id="terminal-box">
+                    <div class="log-line">
+                        <span class="log-time">[00:00]</span>
+                        <span class="log-msg">Sistema ARIA inicializado correctamente.</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div><!-- Espacio libre para interacción directa con el viewport 3D --></div>
+        </main>
+
+        <footer>
+            <div>GIRAR: CLIC IZQ + ARRASTRAR | ZOOM: RUEDA | DESPLAZAR: CLIC DER</div>
+            <div>CORE: DEPTH-ANYTHING-V2 ONNX / THREE.JS WEBGL</div>
+        </footer>
+    </div>
+
+    <!-- Modal Cámara -->
+    <div id="webcam-modal">
+        <div class="panel-title">CAPTURAR DESDE DISPOSITIVO</div>
+        <video id="webcam-video" autoplay playsinline></video>
+        <div style="display: flex; gap: 15px;">
+            <button class="hud-btn" id="snap-btn">CAPTURAR</button>
+            <button class="hud-btn" id="close-cam-btn" style="border-color: var(--danger-red); color: var(--danger-red);">CANCELAR</button>
+        </div>
+    </div>
+
+    <!-- Lógica de la aplicación -->
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { pipeline, env } from '@huggingface/transformers';
+
+        // Configuración Transformers.js para ejecución óptima en navegador
+        env.allowLocalModels = false;
+
+        // --- ESTADO GLOBAL ---
+        let scene, camera, renderer, controls;
+        let currentHologramGroup = null;
+        let currentBlob = null;
+        let depthEstimator = null; // Caché del modelo de IA ONNX
+
+        // --- ELEMENTOS DOM ---
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const previewImg = document.getElementById('preview-img');
+        const dropText = document.getElementById('drop-text');
+        const scanBtn = document.getElementById('scan-btn');
+        const camBtn = document.getElementById('cam-btn');
+        const sysStatus = document.getElementById('sys-status');
+        const terminalBox = document.getElementById('terminal-box');
+        
+        const webcamModal = document.getElementById('webcam-modal');
+        const webcamVideo = document.getElementById('webcam-video');
+        const snapBtn = document.getElementById('snap-btn');
+        const closeCamBtn = document.getElementById('close-cam-btn');
+
+        // --- INICIALIZACIÓN THREE.JS ---
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x030812, 0.03);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.2, 3.5);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            container.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxPolarAngle = Math.PI / 2 + 0.1;
+
+            // Iluminación Futurista
+            const ambientLight = new THREE.AmbientLight(0x002233, 2);
+            scene.add(ambientLight);
+
+            const cyanLight = new THREE.PointLight(0x00f3ff, 5, 10);
+            cyanLight.position.set(2, 3, 2);
+            scene.add(cyanLight);
+
+            const blueLight = new THREE.PointLight(0x0044ff, 4, 10);
+            blueLight.position.set(-2, -1, -2);
+            scene.add(blueLight);
+
+            // Rejilla Holográfica
+            const gridHelper = new THREE.GridHelper(10, 20, 0x00f3ff, 0x003344);
+            gridHelper.position.y = -1;
+            scene.add(gridHelper);
+
+            // Anillo de escaneo
+            const ringGeo = new THREE.RingGeometry(1.2, 1.25, 32);
+            const ringMat = new THREE.MeshBasicMaterial({ color: 0x00f3ff, side: THREE.DoubleSide, transparent: true, opacity: 0.5 });
+            const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+            ringMesh.rotation.x = Math.PI / 2;
+            ringMesh.position.y = -0.99;
+            scene.add(ringMesh);
+
+            // Render loop
+            function animate(time) {
+                requestAnimationFrame(animate);
+                controls.update();
+
+                // Oscilación y rotación suave del holograma activo
+                if (currentHologramGroup) {
+                    currentHologramGroup.rotation.y += 0.003;
+                    currentHologramGroup.position.y = Math.sin(time * 0.0015) * 0.05;
+                }
+
+                ringMesh.rotation.z += 0.01;
+                renderer.render(scene, camera);
+            }
+            animate(0);
+
+            // Adjust viewport on resize
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            // Holograma procedural por defecto al inicio
+            renderProceduralHologram("INITIALIZING ARIA CORE");
+        }
+
+        // --- MODO PROCEDURAL (FALLBACK) ---
+        function renderProceduralHologram(reason = "") {
+            logTerminal(`MOSTRANDO MODELO PROCEDURAL: ${reason}`, "warn");
+            
+            if (currentHologramGroup) scene.remove(currentHologramGroup);
+            currentHologramGroup = new THREE.Group();
+
+            const geometry = new THREE.IcosahedronGeometry(1, 2);
+            const positionAttribute = geometry.attributes.position;
+
+            for (let i = 0; i < positionAttribute.count; i++) {
+                const vertex = new THREE.Vector3();
+                vertex.fromBufferAttribute(positionAttribute, i);
+                const noise = (Math.random() - 0.5) * 0.25;
+                vertex.multiplyScalar(1 + noise);
+                positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
+            }
+            geometry.computeVertexNormals();
+
+            const wireMat = new THREE.MeshBasicMaterial({ color: 0x00f3ff, wireframe: true, transparent: true, opacity: 0.4 });
+            const bodyMat = new THREE.MeshPhongMaterial({ color: 0x003344, emissive: 0x002233, specular: 0x00f3ff, transparent: true, opacity: 0.75 });
+
+            const mesh = new THREE.Mesh(geometry, bodyMat);
+            const wireMesh = new THREE.Mesh(geometry, wireMat);
+            mesh.add(wireMesh);
+
+            currentHologramGroup.add(mesh);
+            scene.add(currentHologramGroup);
+        }
+
+        // --- SISTEMA DE LOGS TERMINAL ARIA ---
+        function logTerminal(message, type = "info") {
+            const now = new Date();
+            const timeStr = `[${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}]`;
+            
+            const line = document.createElement('div');
+            line.className = 'log-line';
+
+            let msgClass = "log-msg";
+            if (type === "warn") msgClass = "log-warn";
+            if (type === "err") msgClass = "log-err";
+            if (type === "success") msgClass = "log-success";
+
+            line.innerHTML = `<span class="log-time">${timeStr}</span><span class="${msgClass}">${message}</span>`;
+            terminalBox.appendChild(line);
+            terminalBox.scrollTop = terminalBox.scrollHeight;
+        }
+
+        // --- MANEJO DE IMÁGENES & DRAG & DROP ---
+        function handleImageFile(file) {
+            if (!file || !file.type.startsWith('image/')) {
+                logTerminal("Error: El archivo debe ser una imagen válida.", "err");
+                return;
+            }
+
+            currentBlob = file;
+            const url = URL.createObjectURL(file);
+            previewImg.src = url;
+            previewImg.style.display = 'block';
+            dropText.style.display = 'none';
+            scanBtn.disabled = false;
+
+            logTerminal(`Imagen cargada: ${file.name || 'captura.png'} (${(file.size/1024).toFixed(1)} KB)`);
+            sysStatus.textContent = "ESTADO: IMAGEN LISTA PARA ESCANEO";
+        }
+
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleImageFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleImageFile(e.target.files[0]);
+        });
+
+        // --- MANEJO DE CÁMARA WEB ---
+        let mediaStream = null;
+        camBtn.addEventListener('click', async () => {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                webcamVideo.srcObject = mediaStream;
+                webcamModal.style.display = 'flex';
+                logTerminal("Cámara activada.");
+            } catch (err) {
+                logTerminal("Error al acceder a la cámara: " + err.message, "err");
+            }
+        });
+
+        function stopWebcam() {
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            webcamModal.style.display = 'none';
+        }
+
+        closeCamBtn.addEventListener('click', stopWebcam);
+
+        snapBtn.addEventListener('click', () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = webcamVideo.videoWidth;
+            canvas.height = webcamVideo.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(webcamVideo, 0, 0);
+            
+            canvas.toBlob((blob) => {
+                handleImageFile(blob);
+                stopWebcam();
+            }, 'image/jpeg', 0.95);
+        });
+
+        // --- NUBE DE PUNTOS REAL A PARTIR DE PROFUNDIDAD (TRANSFORMERS.JS) ---
+        async function runLocalDepthScan() {
+            if (!currentBlob) return;
+
+            scanBtn.disabled = true;
+            logTerminal("INICIANDO SECUENCIA DE ESCANEO DE PROFUNDIDAD...", "success");
+
+            try {
+                // 1. Cargar pipeline de IA (o reutilizar de la caché)
+                if (!depthEstimator) {
+                    sysStatus.textContent = "CARGANDO MODELO DE IA...";
+                    logTerminal("CARGANDO MODELO DE IA (PRIMERA VEZ PUEDE TARDAR)...", "warn");
+                    depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small');
+                    logTerminal("Modelo ONNX cargado e inicializado en memoria.", "success");
+                }
+
+                sysStatus.textContent = "ANALIZANDO PROFUNDIDAD DE IMAGEN...";
+                logTerminal("Ejecutando estimación de mapa de profundidad local...");
+
+                // 2. Preparar imagen y ejecutar modelo de estimación
+                const imageUrl = URL.createObjectURL(currentBlob);
+                const output = await depthEstimator(imageUrl);
+                
+                logTerminal("Mapa de profundidad generado. Construyendo geometría 3D...");
+
+                // 3. Procesar datos en canvas auxiliar para leer colores y mapa de profundidad
+                const img = new Image();
+                img.src = imageUrl;
+                await new Promise((res) => img.onload = res);
+
+                const width = img.width;
+                const height = img.height;
+
+                // Canvas para Color Original
+                const canvasColor = document.createElement('canvas');
+                canvasColor.width = width;
+                canvasColor.height = height;
+                const ctxColor = canvasColor.getContext('2d');
+                ctxColor.drawImage(img, 0, 0);
+                const colorData = ctxColor.getImageData(0, 0, width, height).data;
+
+                // Canvas para Mapa de Profundidad
+                const canvasDepth = document.createElement('canvas');
+                canvasDepth.width = output.depth.width;
+                canvasDepth.height = output.depth.height;
+                const ctxDepth = canvasDepth.getContext('2d');
+                
+                // Dibujar el RawImage devuelto por Transformers.js en el canvas
+                const depthImgData = ctxDepth.createImageData(output.depth.width, output.depth.height);
+                depthImgData.data.set(output.depth.toCanvas().getContext('2d').getImageData(0, 0, output.depth.width, output.depth.height).data);
+                ctxDepth.putImageData(depthImgData, 0, 0);
+
+                // Reescalar depth para coincidir con la resolución original de lectura
+                const canvasDepthScaled = document.createElement('canvas');
+                canvasDepthScaled.width = width;
+                canvasDepthScaled.height = height;
+                const ctxDepthScaled = canvasDepthScaled.getContext('2d');
+                ctxDepthScaled.drawImage(canvasDepth, 0, 0, width, height);
+                const depthData = ctxDepthScaled.getImageData(0, 0, width, height).data;
+
+                // 4. Muestreo de píxeles y generación de BufferGeometry
+                const step = 3; // Muestreo: 1 punto cada 3 píxeles para balancear fluidez y densidad
+                const positions = [];
+                const colors = [];
+
+                const aspect = width / height;
+                const scaleX = 2.0 * aspect;
+                const scaleY = 2.0;
+
+                for (let y = 0; y < height; y += step) {
+                    for (let x = 0; x < width; x += step) {
+                        const index = (y * width + x) * 4;
+
+                        // Posición X e Y normalizadas y centradas en origen
+                        const px = ((x / width) - 0.5) * scaleX;
+                        const py = (-(y / height) + 0.5) * scaleY;
+                        
+                        // Posición Z desde la profundidad (normalizada a rango 0..1 y ajustada en relieve)
+                        const depthValue = depthData[index] / 255.0; 
+                        const pz = (0.5-depthValue) * 0.8;
+
+                        positions.push(px, py, pz);
+
+                        // Color original del píxel
+                        const r = colorData[index] / 255.0;
+                        const g = colorData[index + 1] / 255.0;
+                        const b = colorData[index + 2] / 255.0;
+
+                        colors.push(r, g, b);
+                    }
+                }
+
+                // 5. Crear la Nube de Puntos (THREE.Points)
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+                const material = new THREE.PointsMaterial({
+                    size: 0.018,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.9,
+                    blending: THREE.AdditiveBlending
+                });
+
+                const pointCloud = new THREE.Points(geometry, material);
+
+                // Sustituir modelo actual en escena
+                if (currentHologramGroup) scene.remove(currentHologramGroup);
+                currentHologramGroup = new THREE.Group();
+                currentHologramGroup.add(pointCloud);
+                scene.add(currentHologramGroup);
+
+                const totalPoints = positions.length / 3;
+                logTerminal(`[${totalPoints.toLocaleString()}] PUNTOS GENERADOS.`, "success");
+                logTerminal("NUBE DE PUNTOS RENDERIZADA CON ÉXITO", "success");
+                sysStatus.textContent = "ESTADO: NUBE DE PUNTOS RENDERIZADA";
+
+                URL.revokeObjectURL(imageUrl);
+
+            } catch (error) {
+                logTerminal(`FALLO AL GENERAR PROFUNDIDAD: ${error.message}`, "err");
+                sysStatus.textContent = "ESTADO: FALLO - MODO PROCEDURAL ACTIVADO";
+                renderProceduralHologram(error.message);
+            } finally {
+                scanBtn.disabled = false;
+            }
+        }
+
+        scanBtn.addEventListener('click', runLocalDepthScan);
+
+        // Inicializar escena al cargar el documento
+        window.addEventListener('DOMContentLoaded', initThree);
+    </script>
+</body>
+</html>
