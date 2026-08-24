@@ -688,7 +688,7 @@ meshesToProcess.forEach((child) => {
                 // Promesa real de inferencia al Space de Hugging Face
                 const apiPromise = (async () => {
                     logTerminal("Conectando con tencent/Hunyuan3D-2...");
-                    const client = await Client.connect("tencent/Hunyuan3D-2");
+                    const client = await Client.connect("tencent/Hunyuan3D-2", { hf_token: "hf_TU_TOKhf_VuFrCjhAYyvNpwIlNzhjFPeGWeXbfELgfn" });
                     
                     logTerminal("Enviando tensor de imagen al pipeline 3D...");
                     // Snippet exacto de la documentación oficial suministrada
