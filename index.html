@@ -640,7 +640,7 @@
                         depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small');
                     }
                     if (!segmenter) {
-                        segmenter = await pipeline('background-removal', 'briaai/RMBG-1.4');
+                        segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX');
                     }
                     logTerminal("Modelos ONNX cargados e inicializados en memoria.", "success");
                 }
