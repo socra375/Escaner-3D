@@ -328,13 +328,12 @@
         ::-webkit-scrollbar-thumb:hover { background: var(--primary-cyan); }
     </style>
 
-    <!-- Import Map: Transformers.js (ONNX en navegador) & Three.js -->
+    <!-- Import Map: Three.js -->
     <script type="importmap">
     {
         "imports": {
             "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
-            "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm"
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
         }
     }
     </script>
@@ -389,7 +388,7 @@
 
         <footer>
             <div>GIRAR: CLIC IZQ + ARRASTRAR | ZOOM: RUEDA | DESPLAZAR: CLIC DER</div>
-            <div>CORE: DEPTH-ANYTHING-V2 + RMBG-1.4 / THREE.JS WEBGL</div>
+            <div>CORE: WEB WORKER + DEPTH-ANYTHING-V2 + BEN2 / THREE.JS WEBGL</div>
         </footer>
     </div>
 
@@ -403,22 +402,118 @@
         </div>
     </div>
 
-    <!-- Lógica de la aplicación -->
+    <!-- ==================================================================== -->
+    <!-- CÓDIGO DEL WEB WORKER EMBEBIDO (TAREA 2)                             -->
+    <!-- ==================================================================== -->
+    <script id="worker-script" type="text/template">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm';
+
+        env.allowLocalModels = false;
+
+        let depthEstimator = null;
+        let segmenter = null;
+
+        self.onmessage = async function(e) {
+            const { type, imageBuffer, width, height } = e.data;
+
+            if (type === 'PROCESS_IMAGE') {
+                try {
+                    self.postMessage({ type: 'LOG', msg: 'PROCESANDO EN SEGUNDO PLANO (NO SE CONGELARÁ LA INTERFAZ)...', logType: 'info' });
+
+                    // 1. Cargar Pipelines si no existen en memoria
+                    if (!depthEstimator || !segmenter) {
+                        self.postMessage({ type: 'LOG', msg: 'CARGANDO MODELOS DE IA EN EL WORKER...', logType: 'warn' });
+                        if (!depthEstimator) {
+                            depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small');
+                        }
+                        if (!segmenter) {
+                            segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX');
+                        }
+                        self.postMessage({ type: 'LOG', msg: 'Modelos de IA cargados correctamente en segundo plano.', logType: 'success' });
+                    }
+
+                    // Reconstruir la URL de imagen a partir del ArrayBuffer procesado en worker
+                    const imageBlob = new Blob([imageBuffer], { type: 'image/png' });
+                    const imageUrl = URL.createObjectURL(imageBlob);
+
+                    // 2. Segmentación de Fondo
+                    self.postMessage({ type: 'STATUS', status: 'AISLANDO OBJETO PRINCIPAL (WORKER)...' });
+                    self.postMessage({ type: 'LOG', msg: 'Ejecutando detección de objeto en worker...', logType: 'info' });
+                    
+                    let maskData = null;
+                    try {
+                        const maskOutput = await segmenter(imageUrl);
+                        const maskRaw = Array.isArray(maskOutput) ? maskOutput[0] : maskOutput;
+                        
+                        // Convertir la máscara devuelta a una textura escalada en escala de grises
+                        const canvasMask = new OffscreenCanvas(maskRaw.width, maskRaw.height);
+                        const ctxMask = canvasMask.getContext('2d');
+                        const maskImgData = ctxMask.createImageData(maskRaw.width, maskRaw.height);
+                        maskImgData.data.set(maskRaw.toCanvas().getContext('2d').getImageData(0, 0, maskRaw.width, maskRaw.height).data);
+                        ctxMask.putImageData(maskImgData, 0, 0);
+
+                        // Escalar la máscara a las dimensiones optimizadas (width x height)
+                        const canvasMaskScaled = new OffscreenCanvas(width, height);
+                        const ctxMaskScaled = canvasMaskScaled.getContext('2d');
+                        ctxMaskScaled.drawImage(canvasMask, 0, 0, width, height);
+                        
+                        maskData = ctxMaskScaled.getImageData(0, 0, width, height).data;
+                        self.postMessage({ type: 'LOG', msg: 'Segmentación completada en Web Worker.', logType: 'success' });
+                    } catch (segErr) {
+                        self.postMessage({ type: 'LOG', msg: `Fallback de segmentación: ${segErr.message}`, logType: 'warn' });
+                    }
+
+                    // 3. Estimación de Profundidad
+                    self.postMessage({ type: 'STATUS', status: 'ANALIZANDO PROFUNDIDAD (WORKER)...' });
+                    self.postMessage({ type: 'LOG', msg: 'Ejecutando mapa de profundidad en worker...', logType: 'info' });
+                    
+                    const depthOutput = await depthEstimator(imageUrl);
+
+                    const canvasDepthRaw = new OffscreenCanvas(depthOutput.depth.width, depthOutput.depth.height);
+                    const ctxDepthRaw = canvasDepthRaw.getContext('2d');
+                    const depthImgData = ctxDepthRaw.createImageData(depthOutput.depth.width, depthOutput.depth.height);
+                    depthImgData.data.set(depthOutput.depth.toCanvas().getContext('2d').getImageData(0, 0, depthOutput.depth.width, depthOutput.depth.height).data);
+                    ctxDepthRaw.putImageData(depthImgData, 0, 0);
+
+                    const canvasDepthScaled = new OffscreenCanvas(width, height);
+                    const ctxDepthScaled = canvasDepthScaled.getContext('2d');
+                    ctxDepthScaled.drawImage(canvasDepthRaw, 0, 0, width, height);
+
+                    const depthData = ctxDepthScaled.getImageData(0, 0, width, height).data;
+                    URL.revokeObjectURL(imageUrl);
+
+                    // 4. Enviar resultados usando Transferable Objects (Cero copia de memoria)
+                    const transferList = [depthData.buffer];
+                    if (maskData) transferList.push(maskData.buffer);
+
+                    self.postMessage({
+                        type: 'COMPLETE',
+                        depthData: depthData,
+                        maskData: maskData,
+                        width: width,
+                        height: height
+                    }, transferList);
+
+                } catch (err) {
+                    self.postMessage({ type: 'ERROR', error: err.message });
+                }
+            }
+        };
+    </script>
+
+    <!-- ==================================================================== -->
+    <!-- LÓGICA DE LA APLICACIÓN - HILO PRINCIPAL (THREE.JS)                  -->
+    <!-- ==================================================================== -->
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-        import { pipeline, env } from '@huggingface/transformers';
 
-        // Configuración Transformers.js para ejecución óptima en navegador
-        env.allowLocalModels = false;
-
-        // --- ESTADO GLOBAL Y CACHÉ DE MODELOS ---
+        // --- ESTADO GLOBAL Y WORKER ---
         let scene, camera, renderer, controls;
         let currentHologramGroup = null;
         let currentBlob = null;
-        let depthEstimator = null; // Modelo 1: Estimación de profundidad
-        let segmenter = null;      // Modelo 2: Eliminación de fondo [Problema 1]
-        let scanAnimationId = null; // Referencia para controlar animación de escaneo [Problema 2]
+        let scanAnimationId = null;
+        let aiWorker = null; // Instancia global del Web Worker (TAREA 2)
 
         // --- ELEMENTOS DOM ---
         const dropZone = document.getElementById('drop-zone');
@@ -434,6 +529,44 @@
         const webcamVideo = document.getElementById('webcam-video');
         const snapBtn = document.getElementById('snap-btn');
         const closeCamBtn = document.getElementById('close-cam-btn');
+
+        // --- INICIALIZACIÓN DEL WEB WORKER (TAREA 2) ---
+        function initWorker() {
+            if (aiWorker) {
+                aiWorker.terminate();
+                aiWorker = null;
+            }
+
+            const workerCode = document.getElementById('worker-script').textContent;
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const workerUrl = URL.createObjectURL(blob);
+            
+            aiWorker = new Worker(workerUrl, { type: 'module' });
+
+            // Gestor de mensajes desde el Web Worker hacia el Hilo Principal
+            aiWorker.onmessage = function(e) {
+                const data = e.data;
+
+                if (data.type === 'LOG') {
+                    logTerminal(data.msg, data.logType);
+                } else if (data.type === 'STATUS') {
+                    sysStatus.textContent = `ESTADO: ${data.status}`;
+                } else if (data.type === 'COMPLETE') {
+                    build3DMeshFromWorkerResults(data);
+                } else if (data.type === 'ERROR') {
+                    logTerminal(`FALLO EN WORKER: ${data.error}`, "err");
+                    sysStatus.textContent = "ESTADO: FALLO - MODO PROCEDURAL ACTIVADO";
+                    renderProceduralHologram(data.error);
+                    scanBtn.disabled = false;
+                }
+            };
+
+            aiWorker.onerror = function(err) {
+                logTerminal(`ERROR CRÍTICO WORKER: ${err.message}`, "err");
+                renderProceduralHologram(err.message);
+                scanBtn.disabled = false;
+            };
+        }
 
         // --- INICIALIZACIÓN THREE.JS ---
         function initThree() {
@@ -456,7 +589,7 @@
             controls.dampingFactor = 0.05;
             controls.maxPolarAngle = Math.PI / 2 + 0.1;
 
-            // Iluminación Futurista
+            // Iluminación
             const ambientLight = new THREE.AmbientLight(0x002233, 2);
             scene.add(ambientLight);
 
@@ -481,12 +614,10 @@
             ringMesh.position.y = -0.99;
             scene.add(ringMesh);
 
-            // Render loop
             function animate(time) {
                 requestAnimationFrame(animate);
                 controls.update();
 
-                // Oscilación y rotación suave del holograma activo
                 if (currentHologramGroup) {
                     currentHologramGroup.rotation.y += 0.003;
                     currentHologramGroup.position.y = Math.sin(time * 0.0015) * 0.05;
@@ -497,14 +628,12 @@
             }
             animate(0);
 
-            // Adjust viewport on resize
             window.addEventListener('resize', () => {
                 camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
                 renderer.setSize(window.innerWidth, window.innerHeight);
             });
 
-            // Holograma procedural por defecto al inicio
             renderProceduralHologram("INITIALIZING ARIA CORE");
         }
 
@@ -622,7 +751,57 @@
             }, 'image/jpeg', 0.95);
         });
 
-        // --- ESCANEO DE PROFUNDIDAD Y CONSTRUCCIÓN DE MALLA DE REJILLA ---
+        // --- TAREA 1: REDIMENSIONAR LA IMAGEN ANTES DE PROCESAR ---
+        async function resizeImageIfNeeded(blob, maxDimension = 1024) {
+            const img = new Image();
+            const url = URL.createObjectURL(blob);
+            img.src = url;
+            await new Promise((resolve) => img.onload = resolve);
+            URL.revokeObjectURL(url);
+
+            let width = img.width;
+            let height = img.height;
+            const origW = width;
+            const origH = height;
+
+            if (width > maxDimension || height > maxDimension) {
+                if (width > height) {
+                    height = Math.round((height * maxDimension) / width);
+                    width = maxDimension;
+                } else {
+                    width = Math.round((width * maxDimension) / height);
+                    height = maxDimension;
+                }
+                logTerminal(`OPTIMIZANDO IMAGEN: ${origW}x${origH} → ${width}x${height}`, "warn");
+            } else {
+                logTerminal(`IMAGEN EN RESOLUCIÓN ÓPTIMA: ${width}x${height}`, "info");
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const resizedImageData = ctx.getImageData(0, 0, width, height);
+            
+            // Obtener blob optimizado
+            const resizedBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+            const arrayBuffer = await resizedBlob.arrayBuffer();
+
+            return {
+                blob: resizedBlob,
+                arrayBuffer: arrayBuffer,
+                width: width,
+                height: height,
+                imageData: resizedImageData
+            };
+        }
+
+        // Elemento auxiliar para almacenar datos de color del hilo principal
+        let currentProcessedColorData = null;
+
+        // --- INICIO DEL FLUJO DE ESCANEO DESDE EL HILO PRINCIPAL ---
         async function runLocalDepthScan() {
             if (!currentBlob) return;
             if (scanAnimationId) { cancelAnimationFrame(scanAnimationId); scanAnimationId = null; }
@@ -631,223 +810,151 @@
             logTerminal("INICIANDO SECUENCIA DE ESCANEO DE PROFUNDIDAD...", "success");
 
             try {
-                // 1. Carga diferida y cacheo de pipelines IA (Profundidad + Segmentación) [Problema 1]
-                if (!depthEstimator || !segmenter) {
-                    sysStatus.textContent = "CARGANDO MODELOS DE IA...";
-                    logTerminal("CARGANDO MODELOS DE IA (PROFUNDIDAD + DETECCIÓN DE OBJETO)...", "warn");
-                    
-                    if (!depthEstimator) {
-                        depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small');
-                    }
-                    if (!segmenter) {
-                        segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX');
-                    }
-                    logTerminal("Modelos ONNX cargados e inicializados en memoria.", "success");
-                }
+                // 1. Redimensionar en Hilo Principal (TAREA 1)
+                const resized = await resizeImageIfNeeded(currentBlob, 1024);
+                currentProcessedColorData = resized.imageData.data;
 
-                const imageUrl = URL.createObjectURL(currentBlob);
+                // 2. Reiniciar Worker para estado limpio
+                if (!aiWorker) {
+    initWorker();
+}
 
-                // 2. Ejecutar Segmentación de Fondo (RMBG-1.4) con Fallback [Problema 1]
-                sysStatus.textContent = "AISLANDO OBJETO PRINCIPAL...";
-                logTerminal("AISLANDO OBJETO PRINCIPAL...");
-                
-                let maskCanvasData = null;
-                try {
-                    const maskOutput = await segmenter(imageUrl);
-                    const maskRaw = Array.isArray(maskOutput) ? maskOutput[0] : maskOutput;
-                    
-                    const canvasMask = document.createElement('canvas');
-                    canvasMask.width = maskRaw.width;
-                    canvasMask.height = maskRaw.height;
-                    const ctxMask = canvasMask.getContext('2d');
-                    
-                    const maskImgData = ctxMask.createImageData(maskRaw.width, maskRaw.height);
-                    maskImgData.data.set(maskRaw.toCanvas().getContext('2d').getImageData(0, 0, maskRaw.width, maskRaw.height).data);
-                    ctxMask.putImageData(maskImgData, 0, 0);
-                    
-                    maskCanvasData = { canvas: canvasMask, width: maskRaw.width, height: maskRaw.height };
-                    logTerminal("Segmentación completada exitosamente.", "success");
-                } catch (segError) {
-                    logTerminal(`Fallo en segmentación (${segError.message}). Continuando sin recorte de fondo.`, "warn");
-                }
+                // 3. Transferir trabajo pesado al Web Worker (TAREA 2)
+                logTerminal("PROCESANDO EN SEGUNDO PLANO (NO SE CONGELARÁ LA INTERFAZ)...", "info");
+                sysStatus.textContent = "ESTADO: PROCESANDO EN WORKER...";
 
-                // 3. Estimación de Profundidad (Depth Anything V2)
-                sysStatus.textContent = "ANALIZANDO PROFUNDIDAD DE IMAGEN...";
-                logTerminal("Ejecutando estimación de mapa de profundidad local...");
-                const depthOutput = await depthEstimator(imageUrl);
-                logTerminal("Mapa de profundidad generado. Construyendo malla 3D...", "success");
-
-                // 4. Preparar Canvas auxiliares de procesamiento (Color, Profundidad y Máscara)
-                const img = new Image();
-                img.src = imageUrl;
-                await new Promise((res) => img.onload = res);
-
-                const width = img.width;
-                const height = img.height;
-
-                // Canvas Color Original
-                const canvasColor = document.createElement('canvas');
-                canvasColor.width = width; canvasColor.height = height;
-                const ctxColor = canvasColor.getContext('2d');
-                ctxColor.drawImage(img, 0, 0);
-                const colorData = ctxColor.getImageData(0, 0, width, height).data;
-
-                // Canvas mapa de profundidad (escalado al tamaño original)
-                const canvasDepthRaw = document.createElement('canvas');
-                canvasDepthRaw.width = depthOutput.depth.width;
-                canvasDepthRaw.height = depthOutput.depth.height;
-                const ctxDepthRaw = canvasDepthRaw.getContext('2d');
-                const depthImgData = ctxDepthRaw.createImageData(depthOutput.depth.width, depthOutput.depth.height);
-                depthImgData.data.set(depthOutput.depth.toCanvas().getContext('2d').getImageData(0, 0, depthOutput.depth.width, depthOutput.depth.height).data);
-                ctxDepthRaw.putImageData(depthImgData, 0, 0);
-
-                const canvasDepthScaled = document.createElement('canvas');
-                canvasDepthScaled.width = width; canvasDepthScaled.height = height;
-                const ctxDepthScaled = canvasDepthScaled.getContext('2d');
-                ctxDepthScaled.drawImage(canvasDepthRaw, 0, 0, width, height);
-                const depthData = ctxDepthScaled.getImageData(0, 0, width, height).data;
-
-                // Canvas máscara escalada (si la segmentación tuvo éxito) [Problema 1]
-                let maskData = null;
-                if (maskCanvasData) {
-                    const canvasMaskScaled = document.createElement('canvas');
-                    canvasMaskScaled.width = width; canvasMaskScaled.height = height;
-                    const ctxMaskScaled = canvasMaskScaled.getContext('2d');
-                    ctxMaskScaled.drawImage(maskCanvasData.canvas, 0, 0, width, height);
-                    maskData = ctxMaskScaled.getImageData(0, 0, width, height).data;
-                }
-
-                // 5. Construcción de Malla de Superficie Continuous Wireframe (THREE.PlaneGeometry) [Problema 2]
-                const step = 4; // Paso de muestreo para definir resolución de rejilla
-                const gridX = Math.floor(width / step);
-                const gridY = Math.floor(height / step);
-
-                const aspect = width / height;
-                const planeWidth = 2.0 * aspect;
-                const planeHeight = 2.0;
-
-                const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, gridX, gridY);
-                const posAttr = geometry.attributes.position;
-                
-                const numVertices = posAttr.count;
-                const colors = new Float32Array(numVertices * 3);
-                const isObjectVertex = new Array(numVertices).fill(true);
-
-                // Recorrer los vértices de la rejilla asignando profundidad Z, colores y evaluando la máscara
-                for (let j = 0; j <= gridY; j++) {
-                    for (let i = 0; i <= gridX; i++) {
-                        const vertIdx = j * (gridX + 1) + i;
-
-                        // Mapeo a píxel en imagen fuente
-                        const px = Math.min(Math.floor(i * step), width - 1);
-                        const py = Math.min(Math.floor((j) * step), height - 1);
-                        const imgIdx = (py * width + px) * 4;
-
-                        // Filtrado por máscara de segmentación (umbral > 128) [Problema 1]
-                        let isObj = true;
-                        if (maskData) {
-                            const maskVal = maskData[imgIdx]; // Canal R de la máscara
-                            if (maskVal < 128) {
-                                isObj = false;
-                            }
-                        }
-                        isObjectVertex[vertIdx] = isObj;
-
-                        // Desplazamiento Z según Profundidad
-                        const depthVal = depthData[imgIdx] / 255.0;
-                        const pz = (0.5 - depthVal) * 0.8;
-                        posAttr.setZ(vertIdx, pz);
-
-                        // Asignación de Color por Vértice
-                        colors[vertIdx * 3]     = colorData[imgIdx] / 255.0;
-                        colors[vertIdx * 3 + 1] = colorData[imgIdx + 1] / 255.0;
-                        colors[vertIdx * 3 + 2] = colorData[imgIdx + 2] / 255.0;
-                    }
-                }
-
-                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-                // Filtrar triángulos (caras) que pertenezcan al fondo [Problema 1 y 2]
-                const originalIndices = geometry.index.array;
-                const filteredIndices = [];
-
-                for (let k = 0; k < originalIndices.length; k += 3) {
-                    const idxA = originalIndices[k];
-                    const idxB = originalIndices[k + 1];
-                    const idxC = originalIndices[k + 2];
-
-                    // Si al menos 2 vértices pertenecen al objeto, se dibuja el triángulo
-                    if (isObjectVertex[idxA] && isObjectVertex[idxB] && isObjectVertex[idxC]) {
-                        filteredIndices.push(idxA, idxB, idxC);
-                    }
-                }
-
-                geometry.setIndex(filteredIndices);
-                geometry.computeVertexNormals();
-
-                // 6. Configurar Doble Material Superpuesto (Cuerpo semi-transparente + Rejilla Wireframe) [Problema 2]
-                const bodyMat = new THREE.MeshPhongMaterial({
-                    vertexColors: true,
-                    transparent: true,
-                    opacity: 0.65,
-                    side: THREE.DoubleSide,
-                    shininess: 40
-                });
-
-                const wireMat = new THREE.MeshBasicMaterial({
-                    color: 0x00f3ff,
-                    wireframe: true,
-                    transparent: true,
-                    opacity: 0.85,
-                    side: THREE.DoubleSide
-                });
-
-                const bodyMesh = new THREE.Mesh(geometry, bodyMat);
-                const wireMesh = new THREE.Mesh(geometry, wireMat);
-
-                if (currentHologramGroup) scene.remove(currentHologramGroup);
-                currentHologramGroup = new THREE.Group();
-                currentHologramGroup.add(bodyMesh);
-                currentHologramGroup.add(wireMesh);
-                scene.add(currentHologramGroup);
-
-                // 7. Animación Progresiva por Franjas de arriba a abajo (Scan Effect) [Problema 2]
-                const totalTriangles = filteredIndices.length;
-                let currentDrawCount = 0;
-                const speed = Math.ceil(totalTriangles / 45); // Completa el escaneo en ~45 frames
-
-                geometry.setDrawRange(0, 0);
-
-                function animateScanProgress() {
-                    currentDrawCount += speed;
-                    if (currentDrawCount >= totalTriangles) {
-                        geometry.setDrawRange(0, totalTriangles);
-                        scanAnimationId = null;
-                        logTerminal("ESCANEO COMPLETADO.", "success");
-                    } else {
-                        geometry.setDrawRange(0, currentDrawCount);
-                        scanAnimationId = requestAnimationFrame(animateScanProgress);
-                    }
-                }
-                animateScanProgress();
-
-                logTerminal(`MALLA GENERADA: ${gridX}x${gridY} SEGMENTOS (${(totalTriangles / 3).toLocaleString()} CARAS)`, "success");
-                sysStatus.textContent = "ESTADO: OBJETO 3D RECONSTRUIDO";
-
-                URL.revokeObjectURL(imageUrl);
+                aiWorker.postMessage({
+                    type: 'PROCESS_IMAGE',
+                    imageBuffer: resized.arrayBuffer,
+                    width: resized.width,
+                    height: resized.height
+                }, [resized.arrayBuffer]);
 
             } catch (error) {
-                logTerminal(`FALLO GENERAL DE ESCANEO: ${error.message}`, "err");
+                logTerminal(`FALLO PREPARANDO ESCANEO: ${error.message}`, "err");
                 sysStatus.textContent = "ESTADO: FALLO - MODO PROCEDURAL ACTIVADO";
                 renderProceduralHologram(error.message);
-            } finally {
                 scanBtn.disabled = false;
             }
         }
 
+        // --- CONSTRUCCIÓN 3D EN THREE.JS AL RECIBIR DATOS DEL WORKER ---
+        function build3DMeshFromWorkerResults({ depthData, maskData, width, height }) {
+            logTerminal("Recibidos resultados del Web Worker. Generando geometría 3D...", "success");
+
+            const colorData = currentProcessedColorData;
+            const step = 4;
+            const gridX = Math.floor(width / step);
+            const gridY = Math.floor(height / step);
+
+            const aspect = width / height;
+            const planeWidth = 2.0 * aspect;
+            const planeHeight = 2.0;
+
+            const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, gridX, gridY);
+            const posAttr = geometry.attributes.position;
+            
+            const numVertices = posAttr.count;
+            const colors = new Float32Array(numVertices * 3);
+            const isObjectVertex = new Array(numVertices).fill(true);
+
+            for (let j = 0; j <= gridY; j++) {
+                for (let i = 0; i <= gridX; i++) {
+                    const vertIdx = j * (gridX + 1) + i;
+
+                    const px = Math.min(Math.floor(i * step), width - 1);
+                    const py = Math.min(Math.floor(j * step), height - 1);
+                    const imgIdx = (py * width + px) * 4;
+
+                    let isObj = true;
+                    if (maskData) {
+                        const maskVal = maskData[imgIdx];
+                        if (maskVal < 128) {
+                            isObj = false;
+                        }
+                    }
+                    isObjectVertex[vertIdx] = isObj;
+
+                    const depthVal = depthData[imgIdx] / 255.0;
+                    const pz = (0.5 - depthVal) * 0.8;
+                    posAttr.setZ(vertIdx, pz);
+
+                    colors[vertIdx * 3]     = colorData[imgIdx] / 255.0;
+                    colors[vertIdx * 3 + 1] = colorData[imgIdx + 1] / 255.0;
+                    colors[vertIdx * 3 + 2] = colorData[imgIdx + 2] / 255.0;
+                }
+            }
+
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const originalIndices = geometry.index.array;
+            const filteredIndices = [];
+
+            for (let k = 0; k < originalIndices.length; k += 3) {
+                const idxA = originalIndices[k];
+                const idxB = originalIndices[k + 1];
+                const idxC = originalIndices[k + 2];
+
+                if (isObjectVertex[idxA] && isObjectVertex[idxB] && isObjectVertex[idxC]) {
+                    filteredIndices.push(idxA, idxB, idxC);
+                }
+            }
+
+            geometry.setIndex(filteredIndices);
+            geometry.computeVertexNormals();
+
+            const bodyMat = new THREE.MeshPhongMaterial({
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.65,
+                side: THREE.DoubleSide,
+                shininess: 40
+            });
+
+            const wireMat = new THREE.MeshBasicMaterial({
+                color: 0x00f3ff,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.85,
+                side: THREE.DoubleSide
+            });
+
+            const bodyMesh = new THREE.Mesh(geometry, bodyMat);
+            const wireMesh = new THREE.Mesh(geometry, wireMat);
+
+            if (currentHologramGroup) scene.remove(currentHologramGroup);
+            currentHologramGroup = new THREE.Group();
+            currentHologramGroup.add(bodyMesh);
+            currentHologramGroup.add(wireMesh);
+            scene.add(currentHologramGroup);
+
+            // Animación Progresiva por Franjas (Scan Effect)
+            const totalTriangles = filteredIndices.length;
+            let currentDrawCount = 0;
+            const speed = Math.ceil(totalTriangles / 45);
+
+            geometry.setDrawRange(0, 0);
+
+            function animateScanProgress() {
+                currentDrawCount += speed;
+                if (currentDrawCount >= totalTriangles) {
+                    geometry.setDrawRange(0, totalTriangles);
+                    scanAnimationId = null;
+                    logTerminal("ESCANEO COMPLETADO.", "success");
+                } else {
+                    geometry.setDrawRange(0, currentDrawCount);
+                    scanAnimationId = requestAnimationFrame(animateScanProgress);
+                }
+            }
+            animateScanProgress();
+
+            logTerminal(`MALLA GENERADA: ${gridX}x${gridY} SEGMENTOS (${(totalTriangles / 3).toLocaleString()} CARAS)`, "success");
+            sysStatus.textContent = "ESTADO: OBJETO 3D RECONSTRUIDO";
+            scanBtn.disabled = false;
+        }
+
         scanBtn.addEventListener('click', runLocalDepthScan);
 
-        // Inicializar escena al cargar el documento
         window.addEventListener('DOMContentLoaded', initThree);
     </script>
 </body>
