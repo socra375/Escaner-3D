@@ -424,7 +424,7 @@
                     if (!depthEstimator || !segmenter) {
                         self.postMessage({ type: 'LOG', msg: 'CARGANDO MODELOS DE IA EN EL WORKER...', logType: 'warn' });
                         if (!depthEstimator) {
-                            depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small');
+                            depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { dtype: 'q8' });
                         }
                         if (!segmenter) {
                             segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX', { dtype: 'q8' });
