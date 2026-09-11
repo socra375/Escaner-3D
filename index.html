@@ -89,6 +89,14 @@
             pointer-events: auto;
         }
 
+        /* Ni "main" ni su columna derecha (vacía, sobre el visor 3D) tienen
+           contenido interactivo: si conservan pointer-events, roban los
+           eventos de ratón al canvas y OrbitControls deja de responder. */
+        .hud-overlay main,
+        .hud-overlay main > .viewport-spacer {
+            pointer-events: none;
+        }
+
         /* Header HUD */
         header {
             display: flex;
@@ -383,7 +391,7 @@
                 </div>
             </div>
             
-            <div><!-- Espacio libre para interacción directa con el viewport 3D --></div>
+            <div class="viewport-spacer"><!-- Espacio libre para interacción directa con el viewport 3D --></div>
         </main>
 
         <footer>
@@ -868,7 +876,9 @@
 
                     let isObj = true;
                     if (maskData) {
-                        const maskVal = maskData[imgIdx];
+                        // El pipeline 'background-removal' devuelve una imagen RGBA con el
+                        // recorte del primer plano: el canal alfa es la máscara real, no el rojo.
+                        const maskVal = maskData[imgIdx + 3];
                         if (maskVal < 128) {
                             isObj = false;
                         }
