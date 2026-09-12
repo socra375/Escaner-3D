@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ARIA - Escáner Holográfico 3D</title>
+    <!-- Habilita cross-origin isolation (COOP/COEP) vía Service Worker sin
+         necesitar configurar el servidor: sin esto, onnxruntime-web no
+         puede usar SharedArrayBuffer y cae a WASM de un solo hilo, que es
+         mucho más lento en máquinas sin GPU. Requiere servir la página por
+         http(s) o localhost (no funciona abriendo el archivo con file://). -->
+    <script src="coi-serviceworker.js"></script>
     <!-- Fuentes HUD/Futuristas -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
