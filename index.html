@@ -435,7 +435,10 @@
                             depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { dtype: 'q8' });
                         }
                         if (!segmenter) {
-                            segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX', { dtype: 'q8' });
+                            // BEN2-ONNX no publica una variante cuantizada "q8"
+                            // (onnx/model_quantized.onnx no existe en el repo);
+                            // solo ofrece fp32 (por defecto) y fp16.
+                            segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX');
                         }
                         self.postMessage({ type: 'LOG', msg: 'Modelos de IA cargados correctamente en segundo plano.', logType: 'success' });
                     }
