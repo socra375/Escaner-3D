@@ -437,6 +437,25 @@
             }
         }
 
+        // BEN2-ONNX (eliminación de fondo) es, con diferencia, el modelo más
+        // pesado del flujo. Para una silueta no hace falta la resolución de
+        // trabajo completa: se le pasa una copia reducida y la máscara
+        // resultante se reescala igualmente a "width x height" más abajo.
+        // Esto recorta su coste (que escala con el nº de píxeles) en más de
+        // 4 veces frente a correrlo sobre la imagen completa.
+        async function makeDownscaledCopy(sourceUrl, maxDim) {
+            const bitmap = await createImageBitmap(await (await fetch(sourceUrl)).blob());
+            let w = bitmap.width, h = bitmap.height;
+            if (Math.max(w, h) > maxDim) {
+                if (w > h) { h = Math.round((h * maxDim) / w); w = maxDim; }
+                else { w = Math.round((w * maxDim) / h); h = maxDim; }
+            }
+            const canvas = new OffscreenCanvas(w, h);
+            canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+            bitmap.close();
+            return URL.createObjectURL(await canvas.convertToBlob({ type: 'image/png' }));
+        }
+
         self.onmessage = async function(e) {
             const { type, imageBuffer, width, height } = e.data;
 
@@ -471,8 +490,9 @@
                     self.postMessage({ type: 'LOG', msg: 'Ejecutando detección de objeto en worker...', logType: 'info' });
                     
                     let maskData = null;
+                    const segInputUrl = await makeDownscaledCopy(imageUrl, 384);
                     try {
-                        const maskOutput = await segmenter(imageUrl);
+                        const maskOutput = await segmenter(segInputUrl);
                         const maskRaw = Array.isArray(maskOutput) ? maskOutput[0] : maskOutput;
                         
                         // Convertir la máscara devuelta a una textura escalada en escala de grises
@@ -491,6 +511,8 @@
                         self.postMessage({ type: 'LOG', msg: 'Segmentación completada en Web Worker.', logType: 'success' });
                     } catch (segErr) {
                         self.postMessage({ type: 'LOG', msg: `Fallback de segmentación: ${segErr.message}`, logType: 'warn' });
+                    } finally {
+                        URL.revokeObjectURL(segInputUrl);
                     }
 
                     // 3. Estimación de Profundidad
