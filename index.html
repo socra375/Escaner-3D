@@ -443,12 +443,12 @@
             }
         }
 
-        // BEN2-ONNX (eliminación de fondo) es, con diferencia, el modelo más
-        // pesado del flujo. Para una silueta no hace falta la resolución de
-        // trabajo completa: se le pasa una copia reducida y la máscara
-        // resultante se reescala igualmente a "width x height" más abajo.
-        // Esto recorta su coste (que escala con el nº de píxeles) en más de
-        // 4 veces frente a correrlo sobre la imagen completa.
+        // El segmentador de eliminación de fondo es, con diferencia, el
+        // modelo más pesado del flujo. Para una silueta no hace falta la
+        // resolución de trabajo completa: se le pasa una copia reducida y la
+        // máscara resultante se reescala igualmente a "width x height" más
+        // abajo. Esto recorta su coste (que escala con el nº de píxeles) en
+        // más de 4 veces frente a correrlo sobre la imagen completa.
         async function makeDownscaledCopy(sourceUrl, maxDim) {
             const bitmap = await createImageBitmap(await (await fetch(sourceUrl)).blob());
             let w = bitmap.width, h = bitmap.height;
@@ -477,12 +477,14 @@
                             depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { device, dtype: 'q8' });
                         }
                         if (!segmenter) {
-                            // BEN2-ONNX no publica una variante cuantizada "q8"
-                            // (onnx/model_quantized.onnx no existe en el repo).
-                            // En GPU usamos fp16 (existe y es mucho más rápido);
-                            // en CPU/WASM caemos al fp32 por defecto, que es la
-                            // única variante fiable ahí.
-                            segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX', device === 'webgpu' ? { device, dtype: 'fp16' } : { device });
+                            // ISNet (isnet-general-use, el mismo modelo que usa
+                            // la herramienta "rembg" para objetos genéricos, no
+                            // solo personas) sí publica una variante cuantizada
+                            // "q8" real (~44MB vs ~176MB en fp32), muy superior
+                            // en CPU/WASM a BEN2-ONNX, que solo tenía fp32/fp16.
+                            // En GPU usamos fp16 (los kernels int8 de WebGPU en
+                            // onnxruntime-web aún son limitados).
+                            segmenter = await pipeline('background-removal', 'onnx-community/ISNet-ONNX', device === 'webgpu' ? { device, dtype: 'fp16' } : { device, dtype: 'q8' });
                         }
                         self.postMessage({ type: 'LOG', msg: 'Modelos de IA cargados correctamente en segundo plano.', logType: 'success' });
                     }
