@@ -417,9 +417,25 @@
         import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm';
 
         env.allowLocalModels = false;
+        // Habilita hilos WASM (solo tiene efecto si la página es
+        // cross-origin-isolated; si no, onnxruntime-web ignora el valor
+        // y sigue en un solo hilo, así que fijarlo no tiene coste).
+        env.backends.onnx.wasm.numThreads = self.navigator.hardwareConcurrency || 4;
 
         let depthEstimator = null;
         let segmenter = null;
+
+        // WebGPU acelera la inferencia entre uno y dos órdenes de magnitud
+        // frente a WASM en CPU; si el navegador no lo soporta, se usa WASM.
+        async function pickDevice() {
+            if (!self.navigator.gpu) return 'wasm';
+            try {
+                const adapter = await self.navigator.gpu.requestAdapter();
+                return adapter ? 'webgpu' : 'wasm';
+            } catch {
+                return 'wasm';
+            }
+        }
 
         self.onmessage = async function(e) {
             const { type, imageBuffer, width, height } = e.data;
@@ -430,15 +446,18 @@
 
                     // 1. Cargar Pipelines si no existen en memoria
                     if (!depthEstimator || !segmenter) {
-                        self.postMessage({ type: 'LOG', msg: 'CARGANDO MODELOS DE IA EN EL WORKER...', logType: 'warn' });
+                        const device = await pickDevice();
+                        self.postMessage({ type: 'LOG', msg: `CARGANDO MODELOS DE IA EN EL WORKER (device: ${device})...`, logType: 'warn' });
                         if (!depthEstimator) {
-                            depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { dtype: 'q8' });
+                            depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { device, dtype: 'q8' });
                         }
                         if (!segmenter) {
                             // BEN2-ONNX no publica una variante cuantizada "q8"
-                            // (onnx/model_quantized.onnx no existe en el repo);
-                            // solo ofrece fp32 (por defecto) y fp16.
-                            segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX');
+                            // (onnx/model_quantized.onnx no existe en el repo).
+                            // En GPU usamos fp16 (existe y es mucho más rápido);
+                            // en CPU/WASM caemos al fp32 por defecto, que es la
+                            // única variante fiable ahí.
+                            segmenter = await pipeline('background-removal', 'onnx-community/BEN2-ONNX', device === 'webgpu' ? { device, dtype: 'fp16' } : { device });
                         }
                         self.postMessage({ type: 'LOG', msg: 'Modelos de IA cargados correctamente en segundo plano.', logType: 'success' });
                     }
@@ -822,7 +841,11 @@
 
             try {
                 // 1. Redimensionar en Hilo Principal (TAREA 1)
-                const resized = await resizeImageIfNeeded(currentBlob, 1024);
+                // 768px es un compromiso: la malla usa un paso de 4px, así que
+                // igual produce ~190 segmentos por lado, pero recorta el
+                // coste de la inferencia de IA (que escala con el nº de
+                // píxeles) en casi la mitad frente a 1024px.
+                const resized = await resizeImageIfNeeded(currentBlob, 768);
                 currentProcessedColorData = resized.imageData.data;
 
                 // 2. Reiniciar Worker para estado limpio
