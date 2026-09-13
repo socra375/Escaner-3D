@@ -697,12 +697,36 @@
             renderProceduralHologram("INITIALIZING ARIA CORE");
         }
 
+        // Libera las geometrías, materiales y texturas de un Object3D antes de
+        // descartarlo. scene.remove() solo lo saca del grafo de escena: sin
+        // esto, cada escaneo nuevo deja los buffers de GPU del anterior
+        // huérfanos en memoria (una fuga real en sesiones con varios
+        // escaneos seguidos, como las de esta misma conversación).
+        function disposeObject3D(object) {
+            object.traverse((child) => {
+                if (!child.isMesh) return;
+                if (child.geometry) child.geometry.dispose();
+                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                for (const mat of materials) {
+                    if (!mat) continue;
+                    for (const key in mat) {
+                        const value = mat[key];
+                        if (value && value.isTexture) value.dispose();
+                    }
+                    mat.dispose();
+                }
+            });
+        }
+
         // --- MODO PROCEDURAL (FALLBACK) ---
         function renderProceduralHologram(reason = "") {
             if (scanAnimationId) { cancelAnimationFrame(scanAnimationId); scanAnimationId = null; }
             logTerminal(`MOSTRANDO MODELO PROCEDURAL: ${reason}`, "warn");
-            
-            if (currentHologramGroup) scene.remove(currentHologramGroup);
+
+            if (currentHologramGroup) {
+                disposeObject3D(currentHologramGroup);
+                scene.remove(currentHologramGroup);
+            }
             currentHologramGroup = new THREE.Group();
 
             const geometry = new THREE.IcosahedronGeometry(1, 2);
@@ -1109,7 +1133,10 @@
             const bodyMesh = new THREE.Mesh(sealedGeometry, bodyMat);
             const wireMesh = new THREE.Mesh(sealedGeometry, wireMat);
 
-            if (currentHologramGroup) scene.remove(currentHologramGroup);
+            if (currentHologramGroup) {
+                disposeObject3D(currentHologramGroup);
+                scene.remove(currentHologramGroup);
+            }
             currentHologramGroup = new THREE.Group();
             currentHologramGroup.add(bodyMesh);
             currentHologramGroup.add(wireMesh);
