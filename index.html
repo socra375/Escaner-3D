@@ -388,6 +388,10 @@
                     ⚡ INICIAR ESCANEO
                 </button>
 
+                <button class="hud-btn" id="export-btn" disabled>
+                    💾 EXPORTAR MODELO (.GLB)
+                </button>
+
                 <div class="panel-title">[03] TERMINAL ARIA</div>
                 <div class="terminal-box" id="terminal-box">
                     <div class="log-line">
@@ -567,6 +571,7 @@
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
         // --- ESTADO GLOBAL Y WORKER ---
         let scene, camera, renderer, controls;
@@ -574,6 +579,7 @@
         let currentBlob = null;
         let scanAnimationId = null;
         let aiWorker = null; // Instancia global del Web Worker (TAREA 2)
+        let lastScannedMesh = null; // Malla exportable del último escaneo real (sin el overlay de wireframe)
 
         // --- ELEMENTOS DOM ---
         const dropZone = document.getElementById('drop-zone');
@@ -581,6 +587,7 @@
         const previewImg = document.getElementById('preview-img');
         const dropText = document.getElementById('drop-text');
         const scanBtn = document.getElementById('scan-btn');
+        const exportBtn = document.getElementById('export-btn');
         const camBtn = document.getElementById('cam-btn');
         const sysStatus = document.getElementById('sys-status');
         const terminalBox = document.getElementById('terminal-box');
@@ -728,6 +735,11 @@
                 scene.remove(currentHologramGroup);
             }
             currentHologramGroup = new THREE.Group();
+            // El modelo procedural es un relleno, no un escaneo real: no
+            // tiene sentido dejar exportar la forma anterior mientras se
+            // muestra.
+            lastScannedMesh = null;
+            exportBtn.disabled = true;
 
             const geometry = new THREE.IcosahedronGeometry(1, 2);
             const positionAttribute = geometry.attributes.position;
@@ -1142,6 +1154,12 @@
             currentHologramGroup.add(wireMesh);
             scene.add(currentHologramGroup);
 
+            // Solo se exporta la malla sólida (con color por vértice), no el
+            // overlay de wireframe del HUD: son la misma geometría duplicada
+            // y no aporta nada útil en un archivo .glb.
+            lastScannedMesh = bodyMesh;
+            exportBtn.disabled = false;
+
             // Animación Progresiva por Franjas (Scan Effect)
             const totalTriangles = sealedIndices.length;
             let currentDrawCount = 0;
@@ -1168,6 +1186,35 @@
         }
 
         scanBtn.addEventListener('click', runLocalDepthScan);
+
+        // --- EXPORTACIÓN A .GLB (glTF binario) ---
+        exportBtn.addEventListener('click', async () => {
+            if (!lastScannedMesh) return;
+
+            exportBtn.disabled = true;
+            logTerminal("Exportando modelo a .glb...", "info");
+
+            try {
+                const exporter = new GLTFExporter();
+                const glb = await exporter.parseAsync(lastScannedMesh, { binary: true });
+                const blob = new Blob([glb], { type: "model/gltf-binary" });
+                const url = URL.createObjectURL(blob);
+
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `aria-scan-${Date.now()}.glb`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+
+                logTerminal("Modelo exportado correctamente (.glb).", "success");
+            } catch (error) {
+                logTerminal(`Error al exportar el modelo: ${error.message}`, "err");
+            } finally {
+                exportBtn.disabled = false;
+            }
+        });
 
         window.addEventListener('DOMContentLoaded', initThree);
     </script>
