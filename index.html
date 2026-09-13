@@ -903,6 +903,55 @@
         }
 
         // --- CONSTRUCCIÓN 3D EN THREE.JS AL RECIBIR DATOS DEL WORKER ---
+        // Erosiona la máscara "es objeto" varias pasadas: cerca del borde de
+        // la silueta el mapa de profundidad se contamina con el reescalado
+        // (mezcla profundidades de primer plano y fondo), lo que produce
+        // "púas" que sobresalen del modelo. Descartar el anillo exterior de
+        // vértices evita usar esas lecturas de profundidad poco fiables.
+        function erodeObjectMask(isObjectVertex, gridX, gridY, iterations) {
+            let current = isObjectVertex;
+            const cols = gridX + 1;
+            for (let iter = 0; iter < iterations; iter++) {
+                const next = current.slice();
+                for (let j = 0; j <= gridY; j++) {
+                    for (let i = 0; i <= gridX; i++) {
+                        const idx = j * cols + i;
+                        if (!current[idx]) continue;
+                        const left  = i > 0 ? current[idx - 1] : false;
+                        const right = i < gridX ? current[idx + 1] : false;
+                        const up    = j > 0 ? current[idx - cols] : false;
+                        const down  = j < gridY ? current[idx + cols] : false;
+                        if (!left || !right || !up || !down) next[idx] = false;
+                    }
+                }
+                current = next;
+            }
+            return current;
+        }
+
+        // Encuentra las aristas de silueta (las que solo pertenecen a un
+        // triángulo) para poder cerrar el hueco entre la cara delantera y la
+        // trasera con una pared lateral.
+        function findBoundaryEdges(indices) {
+            const count = new Map();
+            const firstSeen = new Map();
+            for (let k = 0; k < indices.length; k += 3) {
+                const tri = [indices[k], indices[k + 1], indices[k + 2]];
+                for (let e = 0; e < 3; e++) {
+                    const a = tri[e];
+                    const b = tri[(e + 1) % 3];
+                    const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+                    count.set(key, (count.get(key) || 0) + 1);
+                    if (!firstSeen.has(key)) firstSeen.set(key, [a, b]);
+                }
+            }
+            const boundary = [];
+            for (const [key, c] of count) {
+                if (c === 1) boundary.push(firstSeen.get(key));
+            }
+            return boundary;
+        }
+
         function build3DMeshFromWorkerResults({ depthData, maskData, width, height }) {
             logTerminal("Recibidos resultados del Web Worker. Generando geometría 3D...", "success");
 
@@ -951,7 +1000,10 @@
                 }
             }
 
-            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            // Si hay máscara, erosiona el anillo exterior de la silueta antes
+            // de triangular: son los vértices con la profundidad menos
+            // fiable (ver comentario en erodeObjectMask).
+            const keepVertex = maskData ? erodeObjectMask(isObjectVertex, gridX, gridY, 2) : isObjectVertex;
 
             const originalIndices = geometry.index.array;
             const filteredIndices = [];
@@ -961,13 +1013,64 @@
                 const idxB = originalIndices[k + 1];
                 const idxC = originalIndices[k + 2];
 
-                if (isObjectVertex[idxA] && isObjectVertex[idxB] && isObjectVertex[idxC]) {
+                if (keepVertex[idxA] && keepVertex[idxB] && keepVertex[idxC]) {
                     filteredIndices.push(idxA, idxB, idxC);
                 }
             }
 
-            geometry.setIndex(filteredIndices);
-            geometry.computeVertexNormals();
+            // --- Sellar el volumen (TAREA: que no quede como una lámina abierta) ---
+            // No tenemos una foto real del dorso, así que se fabrica una cara
+            // trasera plana (un "respaldo") y se cose con la delantera mediante
+            // una pared lateral a lo largo del borde de la silueta. Así el
+            // resultado es un volumen cerrado en vez de una hoja de una sola
+            // cara flotando en el aire.
+            const frontPositions = posAttr.array;
+            const backZ = -0.55; // más allá del punto más "hundido" posible ((0.5-1)*0.8 = -0.4)
+
+            const combinedPositions = new Float32Array(numVertices * 2 * 3);
+            combinedPositions.set(frontPositions, 0);
+            for (let v = 0; v < numVertices; v++) {
+                combinedPositions[(numVertices + v) * 3]     = frontPositions[v * 3];
+                combinedPositions[(numVertices + v) * 3 + 1] = frontPositions[v * 3 + 1];
+                combinedPositions[(numVertices + v) * 3 + 2] = backZ;
+            }
+
+            const combinedColors = new Float32Array(numVertices * 2 * 3);
+            combinedColors.set(colors, 0);
+            for (let v = 0; v < numVertices; v++) {
+                // Dorso en un tono holográfico oscuro fijo: no conocemos el
+                // color real de la parte trasera del objeto.
+                combinedColors[(numVertices + v) * 3]     = 0.02;
+                combinedColors[(numVertices + v) * 3 + 1] = 0.12;
+                combinedColors[(numVertices + v) * 3 + 2] = 0.16;
+            }
+
+            const boundaryEdges = findBoundaryEdges(filteredIndices);
+
+            const sealedIndices = [];
+            for (let k = 0; k < filteredIndices.length; k += 3) {
+                sealedIndices.push(filteredIndices[k], filteredIndices[k + 1], filteredIndices[k + 2]);
+            }
+            for (let k = 0; k < filteredIndices.length; k += 3) {
+                // Orden invertido para que el dorso mire hacia atrás.
+                sealedIndices.push(
+                    filteredIndices[k] + numVertices,
+                    filteredIndices[k + 2] + numVertices,
+                    filteredIndices[k + 1] + numVertices
+                );
+            }
+            for (const [a, b] of boundaryEdges) {
+                const a2 = a + numVertices;
+                const b2 = b + numVertices;
+                sealedIndices.push(a, b, b2);
+                sealedIndices.push(a, b2, a2);
+            }
+
+            const sealedGeometry = new THREE.BufferGeometry();
+            sealedGeometry.setAttribute('position', new THREE.BufferAttribute(combinedPositions, 3));
+            sealedGeometry.setAttribute('color', new THREE.BufferAttribute(combinedColors, 3));
+            sealedGeometry.setIndex(sealedIndices);
+            sealedGeometry.computeVertexNormals();
 
             const bodyMat = new THREE.MeshPhongMaterial({
                 vertexColors: true,
@@ -985,8 +1088,8 @@
                 side: THREE.DoubleSide
             });
 
-            const bodyMesh = new THREE.Mesh(geometry, bodyMat);
-            const wireMesh = new THREE.Mesh(geometry, wireMat);
+            const bodyMesh = new THREE.Mesh(sealedGeometry, bodyMat);
+            const wireMesh = new THREE.Mesh(sealedGeometry, wireMat);
 
             if (currentHologramGroup) scene.remove(currentHologramGroup);
             currentHologramGroup = new THREE.Group();
@@ -995,20 +1098,20 @@
             scene.add(currentHologramGroup);
 
             // Animación Progresiva por Franjas (Scan Effect)
-            const totalTriangles = filteredIndices.length;
+            const totalTriangles = sealedIndices.length;
             let currentDrawCount = 0;
             const speed = Math.ceil(totalTriangles / 45);
 
-            geometry.setDrawRange(0, 0);
+            sealedGeometry.setDrawRange(0, 0);
 
             function animateScanProgress() {
                 currentDrawCount += speed;
                 if (currentDrawCount >= totalTriangles) {
-                    geometry.setDrawRange(0, totalTriangles);
+                    sealedGeometry.setDrawRange(0, totalTriangles);
                     scanAnimationId = null;
                     logTerminal("ESCANEO COMPLETADO.", "success");
                 } else {
-                    geometry.setDrawRange(0, currentDrawCount);
+                    sealedGeometry.setDrawRange(0, currentDrawCount);
                     scanAnimationId = requestAnimationFrame(animateScanProgress);
                 }
             }
