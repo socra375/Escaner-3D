@@ -903,30 +903,46 @@
         }
 
         // --- CONSTRUCCIÓN 3D EN THREE.JS AL RECIBIR DATOS DEL WORKER ---
-        // Erosiona la máscara "es objeto" varias pasadas: cerca del borde de
-        // la silueta el mapa de profundidad se contamina con el reescalado
-        // (mezcla profundidades de primer plano y fondo), lo que produce
-        // "púas" que sobresalen del modelo. Descartar el anillo exterior de
-        // vértices evita usar esas lecturas de profundidad poco fiables.
-        function erodeObjectMask(isObjectVertex, gridX, gridY, iterations) {
-            let current = isObjectVertex;
+        // Cerca del borde de la silueta el mapa de profundidad se contamina
+        // con el reescalado (mezcla profundidades de primer plano y de
+        // fondo), lo que produce "púas" que sobresalen del modelo. En vez de
+        // erosionar a ciegas un anillo fijo de vértices (eso puede partir en
+        // dos partes finas y legítimas de la silueta, como el empeine de un
+        // zapato o una correa delgada), se compara cada vértice del borde
+        // con la profundidad mediana de sus vecinos interiores y solo se
+        // descarta si es un valor claramente anómalo: la técnica ataca la
+        // causa real (una lectura de profundidad contaminada) sin arriesgar
+        // la conectividad de zonas delgadas cuya profundidad sí es coherente.
+        function removeDepthSpikes(isObjectVertex, depthValues, gridX, gridY, maxDeviation) {
             const cols = gridX + 1;
-            for (let iter = 0; iter < iterations; iter++) {
-                const next = current.slice();
-                for (let j = 0; j <= gridY; j++) {
-                    for (let i = 0; i <= gridX; i++) {
-                        const idx = j * cols + i;
-                        if (!current[idx]) continue;
-                        const left  = i > 0 ? current[idx - 1] : false;
-                        const right = i < gridX ? current[idx + 1] : false;
-                        const up    = j > 0 ? current[idx - cols] : false;
-                        const down  = j < gridY ? current[idx + cols] : false;
-                        if (!left || !right || !up || !down) next[idx] = false;
+            const keep = isObjectVertex.slice();
+            for (let j = 0; j <= gridY; j++) {
+                for (let i = 0; i <= gridX; i++) {
+                    const idx = j * cols + i;
+                    if (!isObjectVertex[idx]) continue;
+
+                    const neighborDepths = [];
+                    if (i > 0     && isObjectVertex[idx - 1])   neighborDepths.push(depthValues[idx - 1]);
+                    if (i < gridX && isObjectVertex[idx + 1])   neighborDepths.push(depthValues[idx + 1]);
+                    if (j > 0     && isObjectVertex[idx - cols]) neighborDepths.push(depthValues[idx - cols]);
+                    if (j < gridY && isObjectVertex[idx + cols]) neighborDepths.push(depthValues[idx + cols]);
+
+                    if (neighborDepths.length < 2) {
+                        // Vértice aislado (una esquina o una mota de un solo
+                        // píxel): no hay suficiente contexto para confiar en
+                        // su profundidad.
+                        keep[idx] = false;
+                        continue;
+                    }
+
+                    neighborDepths.sort((a, b) => a - b);
+                    const median = neighborDepths[Math.floor(neighborDepths.length / 2)];
+                    if (Math.abs(depthValues[idx] - median) > maxDeviation) {
+                        keep[idx] = false;
                     }
                 }
-                current = next;
             }
-            return current;
+            return keep;
         }
 
         // Encuentra las aristas de silueta (las que solo pertenecen a un
@@ -970,6 +986,7 @@
             const numVertices = posAttr.count;
             const colors = new Float32Array(numVertices * 3);
             const isObjectVertex = new Array(numVertices).fill(true);
+            const depthValues = new Float32Array(numVertices);
 
             for (let j = 0; j <= gridY; j++) {
                 for (let i = 0; i <= gridX; i++) {
@@ -991,6 +1008,7 @@
                     isObjectVertex[vertIdx] = isObj;
 
                     const depthVal = depthData[imgIdx] / 255.0;
+                    depthValues[vertIdx] = depthVal;
                     const pz = (0.5 - depthVal) * 0.8;
                     posAttr.setZ(vertIdx, pz);
 
@@ -1000,10 +1018,10 @@
                 }
             }
 
-            // Si hay máscara, erosiona el anillo exterior de la silueta antes
-            // de triangular: son los vértices con la profundidad menos
-            // fiable (ver comentario en erodeObjectMask).
-            const keepVertex = maskData ? erodeObjectMask(isObjectVertex, gridX, gridY, 2) : isObjectVertex;
+            // Si hay máscara, descarta los vértices cuya profundidad es una
+            // anomalía frente a sus vecinos (ver comentario en
+            // removeDepthSpikes) antes de triangular.
+            const keepVertex = maskData ? removeDepthSpikes(isObjectVertex, depthValues, gridX, gridY, 0.25) : isObjectVertex;
 
             const originalIndices = geometry.index.array;
             const filteredIndices = [];
