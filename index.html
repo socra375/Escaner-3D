@@ -466,6 +466,91 @@
             return URL.createObjectURL(await canvas.convertToBlob({ type: 'image/png' }));
         }
 
+        // Radio de cierre morfológico proporcional a la resolución nativa del
+        // segmentador (puede variar según el modelo, aunque la entrada se reduce a
+        // maxDim=384 antes de segmentar). Referencia empírica: r=2 a 384px cierra
+        // huecos de hasta ~4px sin fusionar rasgos separados por más de ~4px.
+        // Se acota a [1,4] para evitar coste/fusión excesivos si el modelo
+        // devolviera una resolución nativa mucho mayor.
+        function computeMaskCloseRadius(maskWidth, maskHeight) {
+            const REFERENCE_DIM = 384;
+            const REFERENCE_RADIUS = 2;
+            const scale = Math.max(maskWidth, maskHeight) / REFERENCE_DIM;
+            return Math.max(1, Math.min(4, Math.round(REFERENCE_RADIUS * scale)));
+        }
+
+        // Cierre morfológico (dilatación + erosión, mismo elemento estructurante
+        // cuadrado de lado 2*radius+1) sobre un canal binario embebido en un array
+        // tipado con stride/offset arbitrarios (p. ej. el canal alfa de un
+        // Uint8ClampedArray RGBA: stride=4, offset=3). Rellena huecos pequeños
+        // (p. ej. un mechón de pelo roto por 1-2 píxeles mal clasificados por el
+        // segmentador) sin desplazar el contorno general de la silueta.
+        //
+        // IMPORTANTE: usa un kernel cuadrado (Chebyshev), no circular — un kernel
+        // circular no cierra huecos de forma fiable a estos radios pequeños (la
+        // erosión exige el vecindario circular completo, que una franja fina recién
+        // dilatada no siempre satisface). No "simplificar" a un disco.
+        //
+        // No muta `data`: devuelve una copia con los píxeles recién cerrados
+        // llevados a 255; todo píxel que ya era foreground conserva su valor alfa
+        // original (incl. antialiasing de bordes), y todo lo que sigue siendo
+        // fondo tras el cierre conserva su valor original también.
+        function closeMaskGaps(data, width, height, radius, options = {}) {
+            const { stride = 1, offset = 0, threshold = 128 } = options;
+            const n = width * height;
+            if (!(radius > 0) || n === 0) {
+                return data.slice ? data.slice() : new data.constructor(data);
+            }
+
+            const binary = new Uint8Array(n);
+            for (let i = 0; i < n; i++) {
+                binary[i] = data[i * stride + offset] >= threshold ? 1 : 0;
+            }
+
+            // Límite de seguridad para imágenes degeneradas muy pequeñas.
+            const maxRadius = Math.max(1, Math.floor(Math.min(width, height) / 4));
+            const r = Math.min(radius, maxRadius);
+
+            function morph(src, dilating) {
+                const dst = new Uint8Array(n);
+                for (let y = 0; y < height; y++) {
+                    const y0 = Math.max(0, y - r), y1 = Math.min(height - 1, y + r);
+                    const clippedY = (y0 !== y - r || y1 !== y + r);
+                    for (let x = 0; x < width; x++) {
+                        const idx = y * width + x;
+                        if (dilating && src[idx]) { dst[idx] = 1; continue; }
+                        if (!dilating && !src[idx]) { dst[idx] = 0; continue; }
+
+                        const x0 = Math.max(0, x - r), x1 = Math.min(width - 1, x + r);
+                        const clippedX = (x0 !== x - r || x1 !== x + r);
+                        // Fuera de los límites de la imagen se trata como fondo:
+                        // erosionar cerca del borde es correcto (no se sabe si el
+                        // objeto continúa fuera del encuadre).
+                        let val = dilating ? 0 : ((clippedX || clippedY) ? 0 : 1);
+                        for (let ny = y0; ny <= y1; ny++) {
+                            const rowBase = ny * width;
+                            for (let nx = x0; nx <= x1; nx++) {
+                                const v = src[rowBase + nx];
+                                if (dilating) { if (v) { val = 1; break; } }
+                                else { if (!v) { val = 0; break; } }
+                            }
+                            if (dilating ? val : !val) break;
+                        }
+                        dst[idx] = val;
+                    }
+                }
+                return dst;
+            }
+
+            const closed = morph(morph(binary, true), false);
+
+            const out = data.slice ? data.slice() : new data.constructor(data);
+            for (let i = 0; i < n; i++) {
+                if (closed[i] && !binary[i]) out[i * stride + offset] = 255;
+            }
+            return out;
+        }
+
         self.onmessage = async function(e) {
             const { type, imageBuffer, width, height } = e.data;
 
@@ -512,6 +597,17 @@
                         const ctxMask = canvasMask.getContext('2d');
                         const maskImgData = ctxMask.createImageData(maskRaw.width, maskRaw.height);
                         maskImgData.data.set(maskRaw.toCanvas().getContext('2d').getImageData(0, 0, maskRaw.width, maskRaw.height).data);
+
+                        // Cierre morfológico sobre la máscara nativa (antes de reescalar):
+                        // rellena micro-huecos que el segmentador deja en estructuras finas
+                        // (p. ej. mechones de pelo), sin ensanchar la silueta general. Se
+                        // hace aquí (resolución nativa, ~384px) y no tras el reescalado a
+                        // "width x height" porque (a) son muchos menos píxeles y (b) evita
+                        // operar sobre valores alfa ya suavizados por interpolación bilineal.
+                        const closeRadius = computeMaskCloseRadius(maskRaw.width, maskRaw.height);
+                        const closedAlpha = closeMaskGaps(maskImgData.data, maskRaw.width, maskRaw.height, closeRadius, { stride: 4, offset: 3 });
+                        maskImgData.data.set(closedAlpha);
+
                         ctxMask.putImageData(maskImgData, 0, 0);
 
                         // Escalar la máscara a las dimensiones optimizadas (width x height)
@@ -1036,6 +1132,8 @@
                     if (maskData) {
                         // El pipeline 'background-removal' devuelve una imagen RGBA con el
                         // recorte del primer plano: el canal alfa es la máscara real, no el rojo.
+                        // El umbral 128 debe coincidir con el usado en closeMaskGaps() dentro
+                        // del worker (que ya cierra los micro-huecos de esta misma máscara).
                         const maskVal = maskData[imgIdx + 3];
                         if (maskVal < 128) {
                             isObj = false;
